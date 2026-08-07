@@ -2,7 +2,6 @@ package device
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -143,13 +142,17 @@ func (v *CC1101PacketLengthConfig) UnmarshalJSON(b []byte) error {
 type CC1101Mode byte
 
 const (
-	Cc1101ModeGFsk1200 CC1101Mode = 0
-	Cc1101ModeLaCrosse CC1101Mode = 1
+	Cc1101ModeGFsk600  CC1101Mode = 0
+	Cc1101ModeGFsk1200 CC1101Mode = 1
+	Cc1101ModeLaCrosse CC1101Mode = 2
 )
 
 func (v *CC1101Mode) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(string(b), "\"")
 	switch s {
+	case "GFsk600":
+		*v = Cc1101ModeGFsk600
+		return nil
 	case "GFsk1200":
 		*v = Cc1101ModeGFsk1200
 		return nil
@@ -453,9 +456,11 @@ type CC1101Strobe byte
 const (
 	Cc1101StrobeSRes    CC1101Strobe = 0x30
 	Cc1101StrobeSFstxon CC1101Strobe = 0x31
+	Cc1101StrobeSXoff   CC1101Strobe = 0x32
 	Cc1101StrobeSRx     CC1101Strobe = 0x34
 	Cc1101StrobeSTx     CC1101Strobe = 0x35
 	Cc1101StrobeSIdle   CC1101Strobe = 0x36
+	Cc1101StrobeSPwd    CC1101Strobe = 0x39
 	Cc1101StrobeSFrx    CC1101Strobe = 0x3A
 	Cc1101StrobeSFtx    CC1101Strobe = 0x3B
 	Cc1101StrobeSNop    CC1101Strobe = 0x3D
@@ -521,8 +526,9 @@ const Cc1101Burst = 0x40
 type CC1101 struct {
 	BusNumber          int
 	DeviceNumber       int
-	GpioChipNumber     int
+	GD0GpioChipNumber  int
 	GD0GpioPin         int
+	GD2GpioChipNumber  int
 	GD2GpioPin         int
 	RxAttenuation      CC1101RxAttenuation
 	Pqt                CC1101Pqt
@@ -552,9 +558,9 @@ type CC1101 struct {
 	EnablePinControl   bool
 	ForceXOSCOn        bool
 	conn               *bus.SPIMaster
-	gpio               *bus.GPIO
-	gd0Pin             bus.GPIOPin
-	gd2Pin             bus.GPIOPin
+	gpio               [8]*bus.GPIO
+	gd0Pin             *bus.GPIOPin
+	gd2Pin             *bus.GPIOPin
 	band               int
 	lastRSSI           int
 	lastLQI            int
@@ -587,6 +593,31 @@ type cc1101BaudRateAndModeParameters struct {
 }
 
 var cc1101PredefinedBaudRateAndModeParameters = []cc1101BaudRateAndModeParameters{
+	//Gfsk 600
+	{
+		adcRetention: 0x40,
+		fifoThr:      7,
+		sYNCH:        0xD3,
+		sYNCL:        0x91,
+		AppendStatus: 4,
+		freqIf:       6,
+		mode:         0x10,
+		chanSpcE:     2,
+		chanSpcM:     0xF8,
+		mDMCFG4:      0xF4,
+		drateM:       0x83,
+		dEVIATN:      0x15,
+		fOCCFG:       0x16,
+		aGCCTRL2:     3,
+		aGCCTRL1:     0x40,
+		wORCTRL:      0xFB,
+		fSCAL3:       0xE9,
+		fSCAL2:       0x2A,
+		fSCAL0:       0x1F,
+		tEST2:        0x81,
+		tEST1:        0x35,
+		tEST0:        0x09,
+	},
 	//Gfsk 1200
 	{
 		adcRetention: 0x40,
@@ -694,6 +725,10 @@ func CC1101Init(configFileName string) (*CC1101, error) {
 		return nil, err
 	}
 	time.Sleep(time.Millisecond)
+	err = device.Check()
+	if err != nil {
+		return nil, err
+	}
 	err = device.initRegisters()
 	if err != nil {
 		return nil, err
@@ -708,32 +743,67 @@ func (device *CC1101) open() error {
 	if err != nil {
 		return err
 	}
-	device.gpio, err = bus.NewGPIO(device.GpioChipNumber)
+	device.gpio[device.GD0GpioChipNumber], err = bus.NewGPIO(device.GD0GpioChipNumber)
 	if err != nil {
-		device.conn.Close()
+		device.Close()
 		return err
 	}
-	device.gd0Pin, err = device.gpio.SetLineInput(device.GD0GpioPin, 0)
+	if device.GD2GpioChipNumber != device.GD0GpioChipNumber {
+		device.gpio[device.GD2GpioChipNumber], err = bus.NewGPIO(device.GD2GpioChipNumber)
+		if err != nil {
+			device.Close()
+			return err
+		}
+	}
+	device.gd0Pin, err = device.gpio[device.GD0GpioChipNumber].SetLineInput(device.GD0GpioPin, 0)
 	if err != nil {
-		device.conn.Close()
-		device.gpio.Close()
+		device.Close()
 		return err
 	}
-	device.gd2Pin, err = device.gpio.SetLineInput(device.GD2GpioPin, 0)
+	device.gd2Pin, err = device.gpio[device.GD2GpioChipNumber].SetLineInput(device.GD2GpioPin, 0)
 	if err != nil {
-		device.conn.Close()
-		device.gd0Pin.Close()
-		device.gpio.Close()
+		device.Close()
 		return err
 	}
 	return nil
 }
 
 func (device *CC1101) Close() {
-	device.conn.Close()
-	device.gd0Pin.Close()
-	device.gd2Pin.Close()
-	device.gpio.Close()
+	if device.conn != nil {
+		device.conn.Close()
+	}
+	if device.gd0Pin != nil {
+		device.gd0Pin.Close()
+	}
+	if device.gd2Pin != nil {
+		device.gd2Pin.Close()
+	}
+	if device.gpio[device.GD0GpioChipNumber] != nil {
+		device.gpio[device.GD0GpioChipNumber].Close()
+	}
+	if device.GD2GpioChipNumber != device.GD0GpioChipNumber && device.gpio[device.GD2GpioChipNumber] != nil {
+		device.gpio[device.GD2GpioChipNumber].Close()
+	}
+}
+
+func (device *CC1101) Check() error {
+	txdata := []byte{cc1101PartNum, 0}
+	rxdata, err := device.tx(false, txdata)
+	if err != nil {
+		return err
+	}
+	if rxdata[1] != 0 {
+		return fmt.Errorf("unknown CC1101 Partnum: %d", rxdata[1])
+	}
+	txdata = []byte{cc1101Version, 0}
+	rxdata, err = device.tx(false, txdata)
+	if err != nil {
+		return err
+	}
+	if rxdata[1] != 0x14 {
+		return fmt.Errorf("unknown CC1101 Version: %d", rxdata[1])
+	}
+	return nil
 }
 
 func (device *CC1101) initRegisters() error {
@@ -819,39 +889,25 @@ func (device *CC1101) initRegisters() error {
 		return err
 	}
 
-	txdata = make([]byte, 3)
-	txdata[0] = cc1101AGCCTRL2
-	txdata[1] = p.aGCCTRL2
-	txdata[2] = p.aGCCTRL1
+	txdata = []byte{cc1101AGCCTRL2, p.aGCCTRL2, p.aGCCTRL1}
 	_, err = device.tx(false, txdata)
 	if err != nil {
 		return err
 	}
 
-	txdata = make([]byte, 2)
-	txdata[0] = cc1101WorCtrl
-	txdata[1] = p.wORCTRL
+	txdata = []byte{cc1101WorCtrl, p.wORCTRL}
 	_, err = device.tx(false, txdata)
 	if err != nil {
 		return err
 	}
 
-	txdata = make([]byte, 5)
-	txdata[0] = cc1101FsCal3
-	txdata[1] = p.fSCAL3
-	txdata[2] = p.fSCAL2
-	txdata[3] = p.fSCAL1
-	txdata[4] = p.fSCAL0
+	txdata = []byte{cc1101FsCal3, p.fSCAL3, p.fSCAL2, p.fSCAL1, p.fSCAL0}
 	_, err = device.tx(false, txdata)
 	if err != nil {
 		return err
 	}
 
-	txdata = make([]byte, 4)
-	txdata[0] = cc1101Test2
-	txdata[1] = p.tEST2
-	txdata[2] = p.tEST1
-	txdata[3] = p.tEST0
+	txdata = []byte{cc1101Test2, p.tEST2, p.tEST1, p.tEST0}
 	_, err = device.tx(false, txdata)
 	return err
 }
@@ -955,12 +1011,26 @@ func (device *CC1101) GetRxBytes() (byte, error) {
 }
 
 func (device *CC1101) PowerControl(powerUp bool) error {
-	_, err := device.Strobe(Cc1101StrobeSIdle)
+	if powerUp {
+		_, err := device.Strobe(Cc1101StrobeSIdle)
+		if err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, err = device.Strobe(Cc1101StrobeSIdle)
+		return err
+	}
+	_, err := device.Strobe(Cc1101StrobeSPwd)
 	return err
 }
 
 func (device *CC1101) ReceiveStart() error {
 	_, err := device.Strobe(Cc1101StrobeSRx)
+	return err
+}
+
+func (device *CC1101) ReceiveStop() error {
+	_, err := device.Strobe(Cc1101StrobeSIdle)
 	return err
 }
 
@@ -1060,5 +1130,27 @@ func (device *CC1101) Calibrate() {
 }
 
 func (device *CC1101) Test() error {
-	return errors.New("not implemented")
+	err := device.SetNumberOfBytesToReceive(16)
+	if err != nil {
+		return err
+	}
+	err = device.ReceiveStart()
+	if err != nil {
+		return err
+	}
+	for range 20 {
+		time.Sleep(time.Second)
+		data, err := device.Receive()
+		if err != nil {
+			return err
+		}
+		if data != nil {
+			fmt.Printf("Received data: %v\n", data)
+			err = device.ReceiveStart()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return device.ReceiveStop()
 }

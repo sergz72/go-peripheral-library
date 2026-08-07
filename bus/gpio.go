@@ -393,7 +393,7 @@ func (g *GPIO) LineRequest(request *GpioV2LineRequest) error {
 	return iface.IOCTL(g.f.Fd(), gPIOV2GetLineIoctl(), uintptr(unsafe.Pointer(request)))
 }
 
-func (g *GPIO) SetLineOutput(offset int, level bool) (GPIOPin, error) {
+func (g *GPIO) SetLineOutput(offset int, level bool) (*GPIOPin, error) {
 	var request GpioV2LineRequest
 	request.numLines = 1
 	request.offsets[0] = uint32(offset)
@@ -410,21 +410,21 @@ func (g *GPIO) SetLineOutput(offset int, level bool) (GPIOPin, error) {
 	request.config.attrs[0].mask = 1
 	err := g.LineRequest(&request)
 	if err != nil {
-		return GPIOPin{}, err
+		return nil, err
 	}
-	return GPIOPin{request.fd}, nil
+	return &GPIOPin{request.fd}, nil
 }
 
-func (g *GPIO) SetLineInput(offset int, flags uint64) (GPIOPin, error) {
+func (g *GPIO) SetLineInput(offset int, flags uint64) (*GPIOPin, error) {
 	var request GpioV2LineRequest
 	request.numLines = 1
 	request.offsets[0] = uint32(offset)
 	request.config.flags = GPIOV2LineFlagInput | flags
 	err := g.LineRequest(&request)
 	if err != nil {
-		return GPIOPin{}, err
+		return nil, err
 	}
-	return GPIOPin{request.fd}, nil
+	return &GPIOPin{request.fd}, nil
 }
 
 func GPIOTest(parameters string) error {
